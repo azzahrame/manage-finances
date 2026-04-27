@@ -1,0 +1,514 @@
+```react
+import React, { useState, useEffect, useMemo } from 'react';
+import { 
+  Calendar, CheckCircle, Circle, Clock, Home, ListTodo, 
+  Moon, PieChart, Plus, Sun, Bell, Filter, X, ChevronLeft, ChevronRight, BookOpen, AlertCircle
+} from 'lucide-react';
+import { 
+  initializeApp 
+} from 'firebase/app';
+import { 
+  getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, updateDoc 
+} from 'firebase/firestore';
+
+// --- Firebase Initialization ---
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'study-planner-app';
+
+// --- Helper Functions ---
+const getTodayStr = () => {
+  const d = new Date();
+  return d.toISOString().split('T')[0];
+};
+
+const formatTime = (isoString) => {
+  if (!isoString) return '';
+  const d = new Date(isoString);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+};
+
+const getDaysInMonth = (year, month) => {
+  return new Date(year, month + 1, 0).getDate();
+};
+
+const getFirstDayOfMonth = (year, month) => {
+  return new Date(year, month, 1).getDay();
+};
+
+export default function App() {
+  // State
+  const [user, setUser] = useState(null);
+  const [tasks, setTasks] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [darkMode, setDarkMode] = useState(false);
+  const [showAddModal, setShowAddModal] = useState(false);
+  
+  // Form State
+  const [newTask, setNewTask] = useState({
+    title: '', course: '', deadlineDate: getTodayStr(), deadlineTime: '12:00', priority: 'medium'
+  });
+
+  // Filter State
+  const [filterCourse, setFilterCourse] = useState('All');
+  const [filterPriority, setFilterPriority] = useState('All');
+
+  // Calendar State
+  const [currentDate, setCurrentDate] = useState(new Date());
+
+  // --- Auth & Data Fetching ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth error:", err);
+      }
+    };
+    initAuth();
+
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const tasksRef = collection(db, 'artifacts', appId, 'users', user.uid, 'tasks');
+    const unsubscribe = onSnapshot(tasksRef, (snapshot) => {
+      const taskList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setTasks(taskList);
+    }, (error) => {
+      console.error("Error fetching tasks:", error);
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  // --- Actions ---
+  const handleAddTask = async (e) => {
+    e.preventDefault();
+    if (!user || !newTask.title.trim()) return;
+
+    const deadlineISO = `${newTask.deadlineDate}T${newTask.deadlineTime}`;
+    const taskId = Date.now().toString();
+    const taskRef = doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', taskId);
+    
+    await setDoc(taskRef, {
+      title: newTask.title,
+      course: newTask.course || 'Umum',
+      deadline: deadlineISO,
+      priority: newTask.priority,
+      completed: false,
+      createdAt: new Date().toISOString()
+    });
+
+    setNewTask({ title: '', course: '', deadlineDate: getTodayStr(), deadlineTime: '12:00', priority: 'medium' });
+    setShowAddModal(false);
+  };
+
+  const toggleTaskStatus = async (task) => {
+    if (!user) return;
+    const taskRef = doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', task.id);
+    await updateDoc(taskRef, { completed: !task.completed });
+  };
+
+  const deleteTask = async (taskId) => {
+    if (!user) return;
+    const taskRef = doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', taskId);
+    await deleteDoc(taskRef);
+  };
+
+  // --- Data Processing ---
+  const courses = ['All', ...new Set(tasks.map(t => t.course))];
+
+  const filteredTasks = useMemo(() => {
+    return tasks.filter(t => {
+      const matchCourse = filterCourse === 'All' || t.course === filterCourse;
+      const matchPriority = filterPriority === 'All' || t.priority === filterPriority;
+      return matchCourse && matchPriority;
+    });
+  }, [tasks, filterCourse, filterPriority]);
+
+  const todayStr = getTodayStr();
+  
+  const todayTasks = filteredTasks.filter(t => t.deadline.startsWith(todayStr));
+  const completedToday = todayTasks.filter(t => t.completed).length;
+  const progressPercent = todayTasks.length > 0 ? Math.round((completedToday / todayTasks.length) * 100) : 0;
+
+  // Group today tasks by time
+  const morningTasks = [];
+  const afternoonTasks = [];
+  const eveningTasks = [];
+
+  todayTasks.forEach(t => {
+    const hour = parseInt(t.deadline.split('T')[1].split(':')[0]);
+    if (hour < 12) morningTasks.push(t);
+    else if (hour < 18) afternoonTasks.push(t);
+    else eveningTasks.push(t);
+  });
+
+  const getPriorityColor = (priority, completed) => {
+    if (completed) return 'bg-gray-100 text-gray-500 border-gray-200 dark:bg-gray-800 dark:text-gray-400 dark:border-gray-700';
+    switch(priority) {
+      case 'high': return 'bg-pink-100 text-pink-700 border-pink-200 dark:bg-pink-900/30 dark:text-pink-300 dark:border-pink-800/50';
+      case 'medium': return 'bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-800/50';
+      case 'low': return 'bg-green-100 text-green-700 border-green-200 dark:bg-green-900/30 dark:text-green-300 dark:border-green-800/50';
+      default: return 'bg-purple-100 text-purple-700 border-purple-200';
+    }
+  };
+
+  // --- Components ---
+  const TaskCard = ({ task }) => (
+    <div className={`p-4 mb-3 rounded-2xl border transition-all duration-300 flex items-start gap-3 shadow-sm ${getPriorityColor(task.priority, task.completed)}`}>
+      <button onClick={() => toggleTaskStatus(task)} className="mt-0.5 shrink-0 focus:outline-none">
+        {task.completed ? <CheckCircle className="w-6 h-6 text-emerald-500" /> : <Circle className="w-6 h-6 opacity-60 hover:opacity-100" />}
+      </button>
+      <div className="flex-1">
+        <h4 className={`font-semibold text-lg leading-tight ${task.completed ? 'line-through opacity-70' : ''}`}>
+          {task.title}
+        </h4>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-sm opacity-80">
+          <span className="flex items-center gap-1 font-medium bg-white/40 dark:bg-black/20 px-2 py-0.5 rounded-md">
+            <BookOpen className="w-3.5 h-3.5" /> {task.course}
+          </span>
+          <span className="flex items-center gap-1 font-medium bg-white/40 dark:bg-black/20 px-2 py-0.5 rounded-md">
+            <Clock className="w-3.5 h-3.5" /> {formatTime(task.deadline)}
+          </span>
+        </div>
+      </div>
+      <button onClick={() => deleteTask(task.id)} className="opacity-40 hover:opacity-100 hover:text-red-500 p-1">
+        <X className="w-4 h-4" />
+      </button>
+    </div>
+  );
+
+  const renderDashboard = () => (
+    <div className="space-y-6 pb-20 animate-in fade-in">
+      {/* Header & Progress */}
+      <div className="bg-gradient-to-r from-purple-200 to-pink-200 dark:from-purple-900/40 dark:to-pink-900/40 p-6 rounded-3xl shadow-sm relative overflow-hidden">
+        <div className="absolute top-0 right-0 p-4 opacity-20">
+          <PieChart className="w-24 h-24" />
+        </div>
+        <h2 className="text-2xl font-bold text-gray-800 dark:text-white mb-2 relative z-10">
+          Halo, Pejuang Kampus! 👋
+        </h2>
+        <p className="text-gray-700 dark:text-gray-200 mb-4 relative z-10 font-medium">
+          Kamu punya {todayTasks.length} tugas hari ini.
+        </p>
+        
+        <div className="bg-white/60 dark:bg-black/30 rounded-2xl p-4 backdrop-blur-sm relative z-10">
+          <div className="flex justify-between items-center mb-2">
+            <span className="text-sm font-bold text-gray-700 dark:text-gray-200">Progres Hari Ini</span>
+            <span className="text-sm font-bold text-purple-700 dark:text-purple-300">{completedToday}/{todayTasks.length} Selesai</span>
+          </div>
+          <div className="h-3 bg-white dark:bg-gray-700 rounded-full overflow-hidden">
+            <div 
+              className="h-full bg-gradient-to-r from-purple-400 to-pink-400 rounded-full transition-all duration-500" 
+              style={{ width: `${progressPercent}%` }}
+            ></div>
+          </div>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+        <div className="flex items-center gap-2 bg-white dark:bg-gray-800 px-3 py-2 rounded-xl shadow-sm shrink-0">
+          <Filter className="w-4 h-4 text-gray-500" />
+          <select 
+            value={filterCourse} onChange={(e) => setFilterCourse(e.target.value)}
+            className="bg-transparent text-sm font-medium focus:outline-none dark:text-white"
+          >
+            {courses.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <div className="flex items-center gap-2 bg-white dark:bg-gray-800 px-3 py-2 rounded-xl shadow-sm shrink-0">
+          <AlertCircle className="w-4 h-4 text-gray-500" />
+          <select 
+            value={filterPriority} onChange={(e) => setFilterPriority(e.target.value)}
+            className="bg-transparent text-sm font-medium focus:outline-none dark:text-white"
+          >
+            <option value="All">Semua Prioritas</option>
+            <option value="high">Tinggi (Pink)</option>
+            <option value="medium">Sedang (Biru)</option>
+            <option value="low">Rendah (Hijau)</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Task Lists Grouped by Time */}
+      <div className="space-y-6">
+        <div>
+          <h3 className="text-lg font-bold flex items-center gap-2 text-orange-500 mb-3">
+            <Sun className="w-5 h-5" /> Pagi (00:00 - 11:59)
+          </h3>
+          {morningTasks.length > 0 ? morningTasks.map(t => <TaskCard key={t.id} task={t} />) : 
+            <p className="text-gray-400 text-sm italic ml-7">Tidak ada tugas pagi.</p>}
+        </div>
+        
+        <div>
+          <h3 className="text-lg font-bold flex items-center gap-2 text-yellow-500 mb-3">
+            <Clock className="w-5 h-5" /> Siang (12:00 - 17:59)
+          </h3>
+          {afternoonTasks.length > 0 ? afternoonTasks.map(t => <TaskCard key={t.id} task={t} />) : 
+            <p className="text-gray-400 text-sm italic ml-7">Tidak ada tugas siang.</p>}
+        </div>
+
+        <div>
+          <h3 className="text-lg font-bold flex items-center gap-2 text-indigo-500 mb-3">
+            <Moon className="w-5 h-5" /> Malam (18:00 - 23:59)
+          </h3>
+          {eveningTasks.length > 0 ? eveningTasks.map(t => <TaskCard key={t.id} task={t} />) : 
+            <p className="text-gray-400 text-sm italic ml-7">Tidak ada tugas malam.</p>}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderCalendar = () => {
+    const year = currentDate.getFullYear();
+    const month = currentDate.getMonth();
+    const daysInMonth = getDaysInMonth(year, month);
+    const firstDay = getFirstDayOfMonth(year, month);
+    
+    const monthNames = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+    
+    const prevMonth = () => setCurrentDate(new Date(year, month - 1, 1));
+    const nextMonth = () => setCurrentDate(new Date(year, month + 1, 1));
+
+    const days = [];
+    for (let i = 0; i < firstDay; i++) days.push(null);
+    for (let i = 1; i <= daysInMonth; i++) days.push(i);
+
+    return (
+      <div className="space-y-6 pb-20 animate-in fade-in">
+        <div className="bg-white dark:bg-gray-800 rounded-3xl p-6 shadow-sm">
+          <div className="flex justify-between items-center mb-6">
+            <h2 className="text-xl font-bold dark:text-white">Kalender Akademik</h2>
+            <div className="flex gap-2">
+              <button onClick={prevMonth} className="p-2 bg-gray-100 dark:bg-gray-700 rounded-full hover:bg-gray-200"><ChevronLeft className="w-5 h-5" /></button>
+              <button onClick={nextMonth} className="p-2 bg-gray-100 dark:bg-gray-700 rounded-full hover:bg-gray-200"><ChevronRight className="w-5 h-5" /></button>
+            </div>
+          </div>
+          <h3 className="text-center font-bold text-lg mb-4 text-purple-600 dark:text-purple-400">{monthNames[month]} {year}</h3>
+          
+          <div className="grid grid-cols-7 gap-1 text-center mb-2">
+            {['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'].map(d => (
+              <div key={d} className="text-xs font-bold text-gray-400">{d}</div>
+            ))}
+          </div>
+          
+          <div className="grid grid-cols-7 gap-2 text-center">
+            {days.map((day, index) => {
+              if (!day) return <div key={index} className="p-2"></div>;
+              
+              const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+              const dayTasks = tasks.filter(t => t.deadline.startsWith(dateStr));
+              const isToday = dateStr === todayStr;
+              
+              return (
+                <div key={index} className={`p-2 rounded-xl border-2 flex flex-col items-center justify-center min-h-[60px] relative transition-all
+                  ${isToday ? 'border-purple-400 bg-purple-50 dark:bg-purple-900/30' : 'border-transparent hover:border-gray-200 dark:hover:border-gray-700 bg-gray-50 dark:bg-gray-800/50'}`}>
+                  <span className={`font-semibold ${isToday ? 'text-purple-600 dark:text-purple-400' : 'text-gray-700 dark:text-gray-300'}`}>{day}</span>
+                  {dayTasks.length > 0 && (
+                    <div className="flex gap-0.5 mt-1">
+                      {dayTasks.slice(0, 3).map((t, i) => (
+                        <div key={i} className={`w-1.5 h-1.5 rounded-full ${t.priority === 'high' ? 'bg-pink-500' : t.priority === 'medium' ? 'bg-blue-500' : 'bg-green-500'}`}></div>
+                      ))}
+                      {dayTasks.length > 3 && <div className="w-1.5 h-1.5 rounded-full bg-gray-400"></div>}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          <h3 className="font-bold text-lg mb-4 flex items-center gap-2 dark:text-white">
+            <Bell className="w-5 h-5 text-yellow-500" /> Deadline Mendatang
+          </h3>
+          {tasks.filter(t => t.deadline >= todayStr && !t.completed).sort((a, b) => a.deadline.localeCompare(b.deadline)).slice(0, 5).map(t => (
+            <TaskCard key={t.id} task={t} />
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderStats = () => {
+    const total = tasks.length;
+    const completed = tasks.filter(t => t.completed).length;
+    const pending = total - completed;
+    const rate = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+    return (
+      <div className="space-y-6 pb-20 animate-in fade-in">
+        <div className="bg-white dark:bg-gray-800 p-6 rounded-3xl shadow-sm text-center">
+          <h2 className="text-xl font-bold mb-6 dark:text-white">Tingkat Produktivitas</h2>
+          <div className="relative w-40 h-40 mx-auto mb-6 flex items-center justify-center rounded-full border-8 border-gray-100 dark:border-gray-700">
+             <div className="absolute inset-0 rounded-full border-8 border-mint-400 border-t-purple-400 border-r-pink-400 opacity-80 animate-[spin_10s_linear_infinite]" 
+                  style={{ clipPath: 'polygon(50% 50%, 50% 0, 100% 0, 100% 100%, 0 100%, 0 0)'}}></div>
+             <div className="relative z-10 text-4xl font-extrabold text-purple-600 dark:text-purple-400">
+                {rate}%
+             </div>
+          </div>
+          <p className="text-gray-500 dark:text-gray-400 font-medium">Bagus! Pertahankan semangatmu.</p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div className="bg-blue-100 dark:bg-blue-900/30 p-5 rounded-3xl text-center">
+            <CheckCircle className="w-8 h-8 text-blue-500 mx-auto mb-2" />
+            <div className="text-3xl font-black text-blue-700 dark:text-blue-300">{completed}</div>
+            <div className="text-sm font-medium text-blue-600 dark:text-blue-400">Tugas Selesai</div>
+          </div>
+          <div className="bg-pink-100 dark:bg-pink-900/30 p-5 rounded-3xl text-center">
+            <ListTodo className="w-8 h-8 text-pink-500 mx-auto mb-2" />
+            <div className="text-3xl font-black text-pink-700 dark:text-pink-300">{pending}</div>
+            <div className="text-sm font-medium text-pink-600 dark:text-pink-400">Belum Selesai</div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  if (loading) return <div className="min-h-screen flex items-center justify-center bg-slate-50 text-purple-500 font-bold animate-pulse">Memuat Planner...</div>;
+
+  return (
+    <div className={`min-h-screen transition-colors duration-300 ${darkMode ? 'dark bg-gray-900' : 'bg-slate-50'} font-sans text-gray-800`}>
+      {/* Top Navigation */}
+      <header className="sticky top-0 z-40 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md px-6 py-4 flex justify-between items-center shadow-sm">
+        <h1 className="text-2xl font-black bg-gradient-to-r from-purple-500 to-pink-500 bg-clip-text text-transparent">
+          StudyPlanner.
+        </h1>
+        <button onClick={() => setDarkMode(!darkMode)} className="p-2 bg-gray-100 dark:bg-gray-800 rounded-full text-gray-600 dark:text-gray-300 hover:scale-110 transition-transform">
+          {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+        </button>
+      </header>
+
+      {/* Main Content */}
+      <main className="max-w-md mx-auto p-4 relative min-h-[calc(100vh-140px)]">
+        {activeTab === 'dashboard' && renderDashboard()}
+        {activeTab === 'calendar' && renderCalendar()}
+        {activeTab === 'stats' && renderStats()}
+      </main>
+
+      {/* Floating Add Button */}
+      <button 
+        onClick={() => setShowAddModal(true)}
+        className="fixed bottom-24 right-6 w-14 h-14 bg-gradient-to-br from-purple-500 to-pink-500 rounded-full text-white shadow-lg flex items-center justify-center hover:scale-110 active:scale-95 transition-all z-40"
+      >
+        <Plus className="w-8 h-8" />
+      </button>
+
+      {/* Bottom Navigation */}
+      <nav className="fixed bottom-0 w-full max-w-md mx-auto inset-x-0 bg-white dark:bg-gray-800 border-t border-gray-100 dark:border-gray-700 px-6 py-3 flex justify-between items-center z-40 pb-safe shadow-[0_-4px_20px_-10px_rgba(0,0,0,0.1)] rounded-t-3xl">
+        {[
+          { id: 'dashboard', icon: Home, label: 'Hari Ini' },
+          { id: 'calendar', icon: Calendar, label: 'Kalender' },
+          { id: 'stats', icon: PieChart, label: 'Statistik' }
+        ].map(tab => (
+          <button 
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`flex flex-col items-center p-2 rounded-2xl min-w-[70px] transition-all ${activeTab === tab.id ? 'text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/20' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-200'}`}
+          >
+            <tab.icon className={`w-6 h-6 mb-1 ${activeTab === tab.id ? 'fill-purple-100 dark:fill-purple-900' : ''}`} />
+            <span className="text-xs font-bold">{tab.label}</span>
+          </button>
+        ))}
+      </nav>
+
+      {/* Add Task Modal */}
+      {showAddModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in">
+          <div className="bg-white dark:bg-gray-800 rounded-3xl p-6 w-full max-w-sm shadow-2xl scale-in-center">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-xl font-bold dark:text-white">Tambah Tugas Baru 📝</h2>
+              <button onClick={() => setShowAddModal(false)} className="bg-gray-100 dark:bg-gray-700 p-2 rounded-full text-gray-500 hover:bg-gray-200 dark:hover:bg-gray-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <form onSubmit={handleAddTask} className="space-y-4">
+              <div>
+                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">Judul Tugas</label>
+                <input 
+                  type="text" required autoFocus
+                  value={newTask.title} onChange={e => setNewTask({...newTask, title: e.target.value})}
+                  className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-purple-400 dark:text-white transition-all"
+                  placeholder="Misal: Makalah Sejarah"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">Mata Kuliah</label>
+                <input 
+                  type="text" required
+                  value={newTask.course} onChange={e => setNewTask({...newTask, course: e.target.value})}
+                  className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-purple-400 dark:text-white transition-all"
+                  placeholder="Misal: Sejarah Indonesia"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">Tanggal</label>
+                  <input 
+                    type="date" required
+                    value={newTask.deadlineDate} onChange={e => setNewTask({...newTask, deadlineDate: e.target.value})}
+                    className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-purple-400 dark:text-white transition-all"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">Jam</label>
+                  <input 
+                    type="time" required
+                    value={newTask.deadlineTime} onChange={e => setNewTask({...newTask, deadlineTime: e.target.value})}
+                    className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-purple-400 dark:text-white transition-all"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">Prioritas</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { value: 'low', label: 'Rendah', color: 'bg-green-100 text-green-700 border-green-200' },
+                    { value: 'medium', label: 'Sedang', color: 'bg-blue-100 text-blue-700 border-blue-200' },
+                    { value: 'high', label: 'Tinggi', color: 'bg-pink-100 text-pink-700 border-pink-200' }
+                  ].map(p => (
+                    <button
+                      key={p.value} type="button"
+                      onClick={() => setNewTask({...newTask, priority: p.value})}
+                      className={`py-2 rounded-xl text-sm font-bold border-2 transition-all ${newTask.priority === p.value ? p.color + ' border-current' : 'bg-gray-50 text-gray-500 border-transparent dark:bg-gray-700 dark:text-gray-300'}`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <button type="submit" className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white font-bold py-4 rounded-xl mt-4 shadow-md hover:opacity-90 active:scale-95 transition-all text-lg">
+                Simpan Tugas
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+```
